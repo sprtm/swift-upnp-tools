@@ -176,8 +176,8 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
      */
     public var presentableDevices: [String:UPnPDevice] {
         var result: [String:UPnPDevice]?
-        lockQueue.sync {
-            result = _devices.filter { [.incompleted, .completed].contains($1.status) }
+        lockQueue.async {
+            result = .self._devices.filter { [.incompleted, .completed].contains($1.status) }
         }
         return result ?? [String:UPnPDevice]()
     }
@@ -911,8 +911,8 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
         }
         self.unsubscribe(forDevice: device).forEach {
             let sid = $0
-            lockQueue.sync {
-                self.eventSubscribers.remove(sid: sid, handler: subscription(removed:))
+            lockQueue.async {
+                self.eventSubscribers.remove(sid: sid, handler: self.subscription(removed:))
             }
         }
         self.device(removed: device)
