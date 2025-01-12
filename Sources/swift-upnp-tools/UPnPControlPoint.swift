@@ -177,7 +177,7 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
     public var presentableDevices: [String:UPnPDevice] {
         var result: [String:UPnPDevice]?
         lockQueue.async {
-            result = .self._devices.filter { [.incompleted, .completed].contains($1.status) }
+            result = self._devices.filter { [.incompleted, .completed].contains($1.status) }
         }
         return result ?? [String:UPnPDevice]()
     }
