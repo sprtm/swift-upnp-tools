@@ -175,11 +175,10 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
      presentable devices
      */
     public var presentableDevices: [String:UPnPDevice] {
-        var result: [String:UPnPDevice]?
-        lockQueue.async {
-            result = self._devices.filter { [.incompleted, .completed].contains($1.status) }
+        // Read shared device state synchronously so callers always get a consistent snapshot.
+        return lockQueue.sync {
+            self._devices.filter { [.incompleted, .completed].contains($1.status) }
         }
-        return result ?? [String:UPnPDevice]()
     }
     var _devices = [String:UPnPDevice]()
 
@@ -189,7 +188,10 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
      */
     @available(*, deprecated, renamed: "presentableDevices")
     public var devices: [String:UPnPDevice] {
-        return _devices
+        // Return a copy of the dictionary while holding the same lock used for writes.
+        return lockQueue.sync {
+            _devices
+        }
     }
 
     var subscribeHandler: UPnPEventSubscriber.subscribeCompletionHandler?
@@ -405,7 +407,9 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
         httpServer?.finish()
         ssdpReceiver?.finish()
 
-        _devices.removeAll()
+        lockQueue.sync {
+            _devices.removeAll()
+        }
         delegate = nil
         eventSubscribers.unsubscribeAll(completionHandler: unsubscribeHandler)
         eventSubscribers.removeAll(subscription(removed:))
@@ -483,7 +487,9 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
      Get device with UDN
      */
     public func getDevice(udn: String) -> UPnPDevice? {
-        return _devices[udn]
+        return lockQueue.sync {
+            _devices[udn]
+        }
     }
 
     /**
@@ -767,30 +773,33 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
                 guard let usn = header.usn else {
                     break
                 }
-                if let device = self._devices[usn.uuid] {
-                    device.renewTimeout()
-                } else if let location = header["LOCATION"] {
-                    if let url = URL(string: location) {
+                var discoveryURL: URL?
+                lockQueue.sync {
+                    if let device = self._devices[usn.uuid] {
+                        device.renewTimeout()
+                    } else if let location = header["LOCATION"], let url = URL(string: location) {
                         let device = UPnPDevice(timeout: 15)
                         device.status = .recognized
-                        lockQueue.sync {
-                            _devices[usn.uuid] = device
-                        }
-                        buildDevice(url: url)
+                        _devices[usn.uuid] = device
+                        discoveryURL = url
                     }
+                }
+                if let url = discoveryURL {
+                    // Perform network/scpd work outside the lock to avoid blocking device map access.
+                    buildDevice(url: url)
                 }
                 break
             case .byebye:
                 if let usn = header.usn {
-                    lockQueue.sync {
-                        self.removeDevice(udn: usn.uuid)
-                    }
+                    self.removeDevice(udn: usn.uuid)
                 }
                 break
             case .update:
                 if let usn = header.usn {
-                    if let device = self._devices[usn.uuid] {
-                        device.renewTimeout()
+                    lockQueue.sync {
+                        if let device = self._devices[usn.uuid] {
+                            device.renewTimeout()
+                        }
                     }
                 }
                 break
@@ -799,13 +808,18 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
             guard let usn = header.usn else {
                 return nil
             }
-            if let device = self._devices[usn.uuid] {
-                device.renewTimeout()
-            } else if let location = header["LOCATION"] {
-                if let url = URL(string: location) {
+            var discoveryURL: URL?
+            lockQueue.sync {
+                if let device = self._devices[usn.uuid] {
+                    device.renewTimeout()
+                } else if let location = header["LOCATION"], let url = URL(string: location) {
                     _devices[usn.uuid] = UPnPDevice(timeout: 15)
-                    buildDevice(url: url)
+                    discoveryURL = url
                 }
+            }
+            if let url = discoveryURL {
+                // Build the device after releasing the lock to keep SSDP handling responsive.
+                buildDevice(url: url)
             }
         }
         return nil
@@ -906,7 +920,11 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
      Remove Device with UDN
      */
     public func removeDevice(udn: String) {
-        guard let device = _devices[udn] else {
+        var device: UPnPDevice?
+        lockQueue.sync {
+            device = _devices[udn]
+        }
+        guard let device = device else {
             return
         }
         self.unsubscribe(forDevice: device).forEach {
@@ -917,7 +935,9 @@ public class UPnPControlPoint : UPnPDeviceBuilderDelegate, HttpRequestHandler {
         }
         self.device(removed: device)
 
-        _devices[udn] = nil
+        lockQueue.sync {
+            _devices[udn] = nil
+        }
     }
 
     func device(removed device: UPnPDevice) {
